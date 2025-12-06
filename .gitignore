@@ -1,0 +1,53 @@
+# --- Python bytecode / cache ---
+__pycache__/
+*.py[cod]
+*$py.class
+
+# --- Virtual environments ---
+.venv/
+venv/
+env/
+ENV/
+.env/
+.python-venv/
+
+# --- Packaging / build artifacts ---
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+*.egg
+
+# --- Test / coverage / tooling ---
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.pytype/
+
+# --- Logs / runtime data ---
+*.log
+*.tmp
+
+# --- IDE / Editor ---
+# JetBrains / PyCharm
+.idea/
+
+# VS Code
+.vscode/
+
+# Editors / OS clutter
+*~
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# --- Misc cache ---
+.cache/
