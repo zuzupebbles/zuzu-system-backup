@@ -479,7 +479,7 @@ See the `LICENSE` file in this repository for the full text.
 
 **Author / Maintainer**
 
-* **Name:** \<your-name-here\>
+* **Name:** Peter Knauer (zuzupebbles)
 
 **Acknowledgements**
 
