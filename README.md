@@ -479,7 +479,7 @@ See the `LICENSE` file in this repository for the full text.
 
 **Author / Maintainer**
 
-* **Name:** Peter Knauer (zuzupebbles)
+* **Name:** Peter Knauer (zuzu@quantweave.ca)
 
 **Acknowledgements**
 
