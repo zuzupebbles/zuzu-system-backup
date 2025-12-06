@@ -1,0 +1,25 @@
+# Maintainer: Peter Knauer <zuzu@quantweave.ca>
+pkgname=zuzu-system-backup
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="SSH/rsync snapshot + mirror backups to NAS for Linux based systems (Python-based)"
+arch=(any)
+depends=(python python-yaml rsync openssh coreutils tar zstd)
+source=(
+  'zuzu-system-backup.py'
+  'zuzu-system-backup.yaml'
+  'zuzu-system-backup.service'
+  'zuzu-system-backup.timer'
+)
+sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP')
+
+package() {
+  install -d "$pkgdir/usr/local/sbin/zuzu-system-backup"
+  install -m 0755 "backup.py"  "$pkgdir/usr/local/sbin/zuzu-system-backup/zuzu-system-backup.py"
+  # Template config; edit per-host after install
+  install -m 0644 "backup.yaml" "$pkgdir/usr/local/sbin/zuzu-system-backup/zuzu-system-backup.yaml"
+
+  install -d "$pkgdir/usr/lib/systemd/system"
+  install -m 0644 "zuzu-system-backup.service" "$pkgdir/usr/lib/systemd/system/zuzu-system-backup.service"
+  install -m 0644 "zuzu-system-backup.timer"   "$pkgdir/usr/lib/systemd/system/zuzu-system-backup.timer"
+}

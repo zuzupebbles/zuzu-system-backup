@@ -1,0 +1,80 @@
+remote:
+  user: backupuser
+  host: backup-nas.local
+  port: 22
+  key: /home/backupuser/.ssh/id_ed25519-orion
+  base: /srv/backup/automated
+  host_dir: system-orion
+
+retention:
+  # Max number of snapshot directories to keep on NAS
+  snapshots: 7
+
+compression:
+  # high | light | none
+  mode: high
+  # Optional: where local temp trees and archives live
+  path: /srv/tmp/backups
+
+rsync:
+  extra_opts:
+    - --numeric-ids
+    - --info=progress2
+    - --protect-args
+
+system:
+  include_paths:
+    - /etc/nftables.conf
+    - /etc/snapper/configs
+    - /etc/NetworkManager/system-connections
+    - /etc/chromium/policies/managed
+    - /etc/fstab
+    - /etc/systemd/system/*.mount
+    - /etc/systemd/system/*.automount
+    - /etc/nut/nut.conf
+    - /etc/nut/upsmon.conf
+
+user:
+  home: /home/devuser
+
+  include_dirs:
+    - .ssh
+    - .gnupg
+    - .local/share/wallpapers
+    - projects
+    - pkgbuilds
+    - venvs
+
+  include_files:
+    - .config/chromium/Default/Preferences
+    - .config/chromium/Default/Bookmarks
+    - .config/vlc/vlcrc
+    - .gitconfig
+    - .bashrc
+    - .bash_profile
+    - .local/share/user-places.xbel
+
+exclude_patterns:
+  # Caches (generic)
+  - "**/Cache/**"
+  - "**/GPUCache/**"
+  - "**/shadercache/**"
+  - "**/ShaderCache/**"
+  - "**/Code Cache/**"
+
+  # SSH ControlMaster sockets
+  - "${USER_HOME}/.ssh/ctl-*"
+  - "**/.ssh/ctl-*"
+
+  # JetBrains bulk (plugins + Toolbox app bundles)
+  - "${USER_HOME}/.local/share/JetBrains/**/plugins/**"
+  - "${USER_HOME}/.local/share/JetBrains/Toolbox/apps/**"
+  - "${USER_HOME}/.cache/JetBrains/**"
+
+  # Chromium bulk (we include only specific files above)
+  - "${USER_HOME}/.config/chromium/**"
+
+single_copy_mappings:
+  # Example mirrors:
+  - "/srv/data/postgres|/srv/backup/automated/sync/system-orion-postgres"
+  - "/srv/data/models|/srv/backup/automated/sync/system-orion-models"
