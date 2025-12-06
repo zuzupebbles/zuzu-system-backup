@@ -439,3 +439,51 @@ Always test restores on a non-production target first.
     * Use dedicated SSH keys per host with restricted accounts on the NAS where possible.
 
 ---
+
+
+## 10. Contributing
+
+Contributions are very welcome, especially around:
+
+* additional backup backends or layout conventions,
+* smarter snapshot/mirror strategies (e.g., per-path compression settings),
+* restore helpers and verification tooling,
+* better safety guards around destructive operations (`--delete`, pruning),
+* distro packaging (Arch, Debian, containers, etc.).
+
+Basic guidelines:
+
+* Treat this as infrastructure code:
+    * avoid surprises in defaults (compression, retention, paths),
+    * keep the YAML schema stable and well-documented,
+    * make new features opt-in whenever they could delete or overwrite data.
+* Be conservative with `rsync --delete`:
+    * mirrors are intentionally destructive, but code paths that trigger deletion should be obvious and well-commented.
+* Keep logs readable and actionable:
+    * clear “what is happening” messages,
+    * explicit summary per run (snapshot name, mirrors processed, pruning done).
+
+Bug reports and pull requests are preferred over vibes and interpretive dance.
+
+---
+
+## 11. License
+
+This project is licensed under the **MIT License**.
+
+See the `LICENSE` file in this repository for the full text.
+
+---
+
+## 12. Author & acknowledgements
+
+**Author / Maintainer**
+
+* **Name:** \<your-name-here\>
+
+**Acknowledgements**
+
+* Inspired by earlier shell-based backup scripts and ad-hoc rsync one-liners that deserved a nicer life.
+* Thanks to everyone who runs this on real systems, weird filesystems, and “creative” NAS setups and reports back what explodes.
+
+The goal of this project is to make Linux backups **boring, predictable, and inspectable**—for both humans and tools trying to reason about how and where data is stored.
