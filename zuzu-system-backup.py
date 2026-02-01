@@ -61,15 +61,29 @@ class Remote:
     host_dir: str
 
 
-def eprint(*args: object) -> None:
-    print(*args, file=sys.stderr)
+def eprint(*args: object, **kwargs: object) -> None:
+    """Print to stderr (supports print() kwargs like end=)."""
+    print(*args, file=sys.stderr, **kwargs)
 
 
 def run(cmd: List[str], *, env: Optional[Dict[str, str]] = None, check: bool = True) -> subprocess.CompletedProcess:
-    """Run a command, echoing it in a copy/paste-friendly form."""
+    """Run a command, echoing it in a copy/paste-friendly form.
+
+    Implementation detail:
+      - We capture stdout/stderr so failures are visible in systemd/journal logs.
+      - We print captured output back through our stdout/stderr.
+      - When check=True we raise SystemExit (not a Python traceback) with context.
+    """
     printable = " ".join(shlex.quote(c) for c in cmd)
     print(f"$ {printable}")
-    return subprocess.run(cmd, env=env, check=check)
+    p = subprocess.run(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if p.stdout:
+        print(p.stdout, end="")
+    if p.stderr:
+        eprint(p.stderr, end="")
+    if check and p.returncode != 0:
+        raise SystemExit(f"Command failed (exit {p.returncode}): {printable}")
+    return p
 
 
 def run_capture(cmd: List[str], *, env: Optional[Dict[str, str]] = None) -> subprocess.CompletedProcess:
@@ -103,9 +117,56 @@ def ssh_base(remote: Remote) -> List[str]:
     cmd = ["ssh", "-p", str(remote.port), "-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]
     # Use an explicit key if provided; otherwise let ssh_config handle it.
     if remote.key:
-        cmd += ["-i", remote.key]
+        cmd += ["-i", remote.key, "-o", "IdentitiesOnly=yes"]
     cmd += [f"{remote.user}@{remote.host}"]
     return cmd
+
+
+def restic_extra_args(cfg: Dict, remote: Remote, repo: str) -> List[str]:
+    """Return extra *global* restic args.
+
+    Primary goal: make SFTP deterministic under systemd by ensuring restic's SFTP backend
+    uses the intended SSH identity (and doesn't try a bunch of unrelated keys).
+
+    Supported config (all optional):
+      restic:
+        sftp_args: "-i /path/to/key -o IdentitiesOnly=yes ..."
+        extra_args: ["--option", "value", ...]   # advanced escape hatch
+
+    Defaults:
+      - If repo uses sftp: and remote.key is configured, we automatically set sftp.args.
+    """
+    r = cfg.get("restic", {}) or {}
+    extra: List[str] = [str(x) for x in (r.get("extra_args", []) or []) if str(x).strip()]
+
+    # Only apply sftp.args when using the sftp backend.
+    if not str(repo).startswith("sftp:"):
+        return extra
+
+    sftp_args = r.get("sftp_args")
+    # Allow YAML to specify list form.
+    if isinstance(sftp_args, list):
+        sftp_args = " ".join(str(x) for x in sftp_args if str(x).strip())
+    if isinstance(sftp_args, str):
+        sftp_args = sftp_args.strip() or None
+
+    # Auto-wire when remote.key is present and no explicit sftp_args was provided.
+    if not sftp_args and remote.key:
+        # NOTE: do not shell-quote here; restic passes this string to an argument parser,
+        # not to a shell, and literal quotes can break IdentityFile parsing.
+        sftp_args = (
+            f"-p {remote.port} "
+            f"-i {remote.key} "
+            "-o IdentitiesOnly=yes "
+            "-o BatchMode=yes "
+            "-o ConnectTimeout=10"
+        )
+
+    if sftp_args:
+        # restic expects this as a single argument value.
+        extra += ["-o", f"sftp.args={sftp_args}"]
+
+    return extra
 
 
 def ensure_restic_installed() -> None:
@@ -158,15 +219,15 @@ def ensure_remote_dir(remote: Remote, path: str) -> None:
     run(mkdir_cmd)
 
 
-def ensure_restic_repo_initialized(repo: str, env: Dict[str, str]) -> None:
+def ensure_restic_repo_initialized(repo: str, env: Dict[str, str], extra_args: List[str]) -> None:
     # "restic snapshots" is a cheap way to test access and repo validity.
-    p = run_capture(["restic", "-r", repo, "snapshots"], env=env)
+    p = run_capture(["restic", *extra_args, "-r", repo, "snapshots"], env=env)
     if p.returncode == 0:
         return
 
     combined = (p.stdout or "") + "\n" + (p.stderr or "")
     if "Is there a repository" in combined or "repository does not exist" in combined:
-        run(["restic", "-r", repo, "init"], env=env)
+        run(["restic", *extra_args, "-r", repo, "init"], env=env)
         return
 
     # Wrong password, permission issues, or network.
@@ -217,7 +278,15 @@ def exclude_file(cfg: Dict) -> Optional[str]:
     return str(p)
 
 
-def restic_backup(cfg: Dict, repo: str, env: Dict[str, str], host_tag: str, *, dry_run: bool) -> None:
+def restic_backup(
+    cfg: Dict,
+    repo: str,
+    env: Dict[str, str],
+    host_tag: str,
+    extra_args: List[str],
+    *,
+    dry_run: bool,
+) -> None:
     paths = system_paths(cfg) + expand_user_paths(cfg)
     paths = [p for p in paths if p]
     if not paths:
@@ -226,7 +295,7 @@ def restic_backup(cfg: Dict, repo: str, env: Dict[str, str], host_tag: str, *, d
 
     ex_file = exclude_file(cfg)
 
-    cmd = ["restic", "-r", repo, "backup"]
+    cmd = ["restic", *extra_args, "-r", repo, "backup"]
     cmd += ["--tag", host_tag]
     # Optional additional tags
     for t in (cfg.get("restic", {}) or {}).get("tags", []) or []:
@@ -254,7 +323,15 @@ def restic_backup(cfg: Dict, repo: str, env: Dict[str, str], host_tag: str, *, d
                 pass
 
 
-def restic_forget(cfg: Dict, repo: str, env: Dict[str, str], host_tag: str, *, dry_run: bool) -> None:
+def restic_forget(
+    cfg: Dict,
+    repo: str,
+    env: Dict[str, str],
+    host_tag: str,
+    extra_args: List[str],
+    *,
+    dry_run: bool,
+) -> None:
     retention = cfg.get("retention", {}) or {}
 
     # Backward compatibility: retention.snapshots -> keep-last
@@ -270,7 +347,7 @@ def restic_forget(cfg: Dict, repo: str, env: Dict[str, str], host_tag: str, *, d
 
     prune = retention.get("prune", True)
 
-    cmd = ["restic", "-r", repo, "forget", "--tag", host_tag]
+    cmd = ["restic", *extra_args, "-r", repo, "forget", "--tag", host_tag]
 
     def add_keep(flag: str, val: object) -> None:
         if val is None:
@@ -337,7 +414,7 @@ def rsync_single_copy(cfg: Dict, remote: Remote, *, dry_run: bool) -> None:
 def _rsync_ssh(remote: Remote) -> str:
     parts = ["ssh", "-p", str(remote.port)]
     if remote.key:
-        parts += ["-i", remote.key]
+        parts += ["-i", remote.key, "-o", "IdentitiesOnly=yes"]
     parts += ["-o", "BatchMode=yes"]
     return " ".join(shlex.quote(p) for p in parts)
 
@@ -358,17 +435,18 @@ def main() -> None:
 
     repo = restic_repo(cfg, remote)
     host_tag = f"host={remote.host_dir}"
+    extra_args = restic_extra_args(cfg, remote, repo)
 
     # Ensure repo dir exists on NAS when using the default layout.
     # (If you set restic.repository yourself, you're responsible for its existence.)
     if "restic" not in cfg or not (cfg.get("restic", {}) or {}).get("repository"):
         ensure_remote_dir(remote, f"{remote.base}/{remote.host_dir}/restic-repo")
 
-    ensure_restic_repo_initialized(repo, env)
-    restic_backup(cfg, repo, env, host_tag, dry_run=args.dry_run)
+    ensure_restic_repo_initialized(repo, env, extra_args)
+    restic_backup(cfg, repo, env, host_tag, extra_args, dry_run=args.dry_run)
 
     if not args.no_forget:
-        restic_forget(cfg, repo, env, host_tag, dry_run=args.dry_run)
+        restic_forget(cfg, repo, env, host_tag, extra_args, dry_run=args.dry_run)
 
     if not args.no_rsync:
         rsync_single_copy(cfg, remote, dry_run=args.dry_run)
