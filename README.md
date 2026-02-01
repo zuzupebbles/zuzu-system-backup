@@ -411,7 +411,6 @@ Enable:
 sudo systemctl daemon-reload
 sudo systemctl enable --now zuzu-system-backup.timer
 ```
-
 Run once immediately:
 
 ```bash
