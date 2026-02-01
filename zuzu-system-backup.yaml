@@ -6,15 +6,17 @@ remote:
   base: /srv/backup/automated
   host_dir: system-orion
 
-retention:
-  # Max number of snapshot directories to keep on NAS
-  snapshots: 7
+restic:
+  password_file: [REQUIRED]
+  # optional: override repository (otherwise the script’s default is used)
+  # repository: "sftp:zocalo:/share/backup/automated/daily/system-agamemnon/restic-repo"
 
-compression:
-  # high | light | none
-  mode: high
-  # Optional: where local temp trees and archives live
-  path: /srv/tmp/backups
+retention:
+  keep_daily: 7
+  keep_weekly: 4
+  keep_monthly: 6
+  keep_yearly: 1
+  keep_within: ""     # optional, e.g. "14d" or "3m"
 
 rsync:
   extra_opts:
@@ -48,7 +50,6 @@ user:
   include_files:
     - .config/chromium/Default/Preferences
     - .config/chromium/Default/Bookmarks
-    - .config/vlc/vlcrc
     - .gitconfig
     - .bashrc
     - .bash_profile
@@ -66,15 +67,5 @@ exclude_patterns:
   - "${USER_HOME}/.ssh/ctl-*"
   - "**/.ssh/ctl-*"
 
-  # JetBrains bulk (plugins + Toolbox app bundles)
-  - "${USER_HOME}/.local/share/JetBrains/**/plugins/**"
-  - "${USER_HOME}/.local/share/JetBrains/Toolbox/apps/**"
-  - "${USER_HOME}/.cache/JetBrains/**"
-
   # Chromium bulk (we include only specific files above)
   - "${USER_HOME}/.config/chromium/**"
-
-single_copy_mappings:
-  # Example mirrors:
-  - "/srv/data/postgres|/srv/backup/automated/sync/system-orion-postgres"
-  - "/srv/data/models|/srv/backup/automated/sync/system-orion-models"

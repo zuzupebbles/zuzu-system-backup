@@ -1,220 +1,166 @@
 # zuzu-system-backup
 
-Python-based backup tool for Linux hosts that pushes **snapshots** and **live mirrors** to a remote NAS over SSH/rsync.
+A small, opinionated **system + user config backup** tool that uses **restic** to create **deduplicated, encrypted snapshots** on a NAS over **SFTP/SSH**.
 
-- Snapshots are compressed archives (tar + optional zstd) created on the host, then uploaded.
-- Mirrors are “single-copy” rsync trees kept in sync with `--delete`.
-- Configuration is per-host, in YAML.
-- Scheduling is done via systemd timers.
+This repo started life as “rsync + tarballs”. It is now **restic-first**:
 
-All hostnames, users, and paths in this README use **fictional example values** so it’s safe to publish as-is. Replace them with your own.
+- No “daily tar.gz” piles
+- No bespoke rotation logic
+- Snapshots are space-efficient (dedupe) and encrypted
+- Retention can be “smart” (daily/weekly/monthly/yearly) via `restic forget`
 
----
+## Backup share layout on the NAS
 
-## 1. High-level architecture
+You can keep the same "automated" root you already use. The key difference is that the destination becomes a **restic repository directory**, not a directory full of tarballs.
 
-### 1.1 Components
+Example layout (conceptual):
 
-- **Host script**: `zuzu-system-backup.py`
-  - Runs on each Linux host.
-  - Reads per-host `backup.yaml`.
-  - Builds local temp trees, compresses them, and uploads archives.
-  - Manages retention (max snapshot count).
-- **Remote backup share** (NAS / backup server):
-  - Exposed via SSH (and optionally a mounted share).
-  - Receives snapshot archives and sync mirrors.
+```text
+/share/backup/automated/
+  daily/
+    system-orion/
+      restic-repo/
+        config
+        index/
+        data/
+        snapshots/
+        keys/
+```
 
-### 1.2 Snapshot vs mirror
+Nothing inside `restic-repo/` is meant to be edited by hand. Treat it as an opaque repository and interact with it via `restic`.
 
-The script supports two complementary backup modes:
-
-1. **Snapshots** (versioned)
-   - Controlled by:
-     - `system.include_paths`
-     - `user.include_dirs`
-     - `user.include_files`
-   - On each run:
-     - rsync selected paths into a **local temp tree** per category.
-     - compress each category into a single `*.tar` or `*.tar.zst` archive.
-     - upload archives to a timestamped directory on the backup share.
-
-2. **Single-copy mirrors** (no history)
-   - Controlled by `single_copy_mappings`.
-   - Each mapping is `"LOCAL_SRC|REMOTE_DEST"`.
-   - rsync with `--delete` keeps the remote tree in sync with local.
-   - Intended for large data (databases, model stores, etc.).
-
----
-
-## 2. Data-flow diagrams
-
-### 2.1 Backup flow on a single host
-
-```mermaid
-flowchart LR
-    subgraph Host["Linux host (example: orion.example.net)"]
-        A[Snapshot sources\nsystem + user] --> B[Local temp trees\nsystem / user-dirs / user-files]
-        B --> C[Tar plus optional zstd\ncreate archives]
-        D[Mirror sources\nsingle_copy_mappings] --> E[rsync --delete]
-    end
-
-subgraph NAS["Backup share (example: backup-nas.local)"]
-C --> F[Snapshots directory\n/daily/system-orion/<timestamp>/]
-E --> G[Sync mirrors\n/sync/system-orion-*]
-end
-
-````
-
-* Snapshots: archives are compressed **locally** and only the archives are sent.
-* Mirrors: rsync goes directly from host paths to remote paths, with `--delete`.
-
-### 2.2 Control flow inside the script
+## Control flow
 
 ```mermaid
 flowchart TD
-    Start([systemd timer or manual run])
---> LCFG[Load backup.yaml]
---> PREP[Compute paths and compression root]
---> SNAPROOT[Ensure remote snapshots root exists]
---> SNAPNAME[Generate snapshot name\nYYYY-MM-DD_HH-MM-SS]
---> MKDIR_REMOTE[Create remote snapshot directory]
-
-MKDIR_REMOTE --> TMPDIR[Create local temp root]
-
-TMPDIR --> RSYNC_SYS[rsync system.include_paths\ninto temp/system]
-TMPDIR --> RSYNC_UDIR[rsync user.include_dirs\ninto temp/user-dirs]
-TMPDIR --> RSYNC_UFILE[rsync user.include_files\ninto temp/user-files]
-
-RSYNC_SYS --> COMP_SYS[Compress system category\ncreate system archive]
-RSYNC_UDIR --> COMP_UDIR[Compress user-dirs category\ncreate user-dirs archive]
-RSYNC_UFILE --> COMP_UFILE[Compress user-files category\ncreate user-files archive]
-
-COMP_SYS --> UPLOAD_SYS[Upload archives to remote snapshot directory]
-COMP_UDIR --> UPLOAD_UDIR
-COMP_UFILE --> UPLOAD_UFILE
-
-UPLOAD_UFILE --> MIRRORS[Process mirrors\nsingle_copy_mappings with rsync --delete]
-MIRRORS --> PRUNE[Prune old snapshots\nkeep at most N]
-PRUNE --> CLEANUP[Remove temp tree and excludes file]
-CLEANUP --> Done([Exit])
-
+  A[Load backup.yaml] --> B[Resolve include paths]
+  B --> C[Resolve exclude patterns]
+  C --> D[Compute repo URL]
+  D --> E[Ensure repo init]
+  E --> F[Run restic backup]
+  F --> G[Apply retention forget]
+  G --> H[Prune unneeded data]
 ```
 
----
+## Backup share layout on the NAS
 
-## 3. Backup share layout
+You can keep the same "automated" root you already use. The key difference is that the destination becomes a **restic repository directory**, not a directory full of tarballs.
 
-This project assumes a structured backup share on the NAS or backup server, for example:
+Example layout (conceptual):
 
 ```text
-/srv/backup/
-  automated/
-    daily/
-      system-orion/
-        2025-01-01_03-00-01/
-          system.tar.zst
-          user-dirs.tar.zst
-          user-files.tar.zst
-        2025-01-02_03-00-01/
-          ...
-      system-pegasus/
-      system-hera/
-
-    sync/
-      system-orion-databases/
-        ... live rsync mirror ...
-      system-orion-models/
-        ...
-      system-pegasus-luns/
-        ...
-
-  manual/
-    installer-isos/
-    http-bookmarks/
-    license-keys/
-    ...
+/share/backup/automated/
+  daily/
+    system-orion/
+      restic-repo/
+        config
+        index/
+        data/
+        snapshots/
+        keys/
 ```
 
-Typical patterns:
-
-* **automated/daily/system-<host>/**
-  Date-based snapshot directories, each containing only a few archives.
-* **automated/sync/system-<host>-<purpose>/**
-  One dir per mirror, updated in place.
-* **manual/**
-  Hand-managed backups, not touched by this tool.
-
-You can adapt the root (`/srv/backup`) and naming (`system-orion`, etc.) to match your environment.
+Nothing inside `restic-repo/` is meant to be edited by hand. Treat it as an opaque repository and interact with it via `restic`.
 
 ---
 
-## 4. Features
+## What it does
 
-* Python 3 script, no shell gymnastics.
-* YAML configuration, per-host.
-* Snapshot categories:
-
-    * `system.include_paths` (root-owned config and service dirs)
-    * `user.include_dirs` (full user trees, relative to `user.home`)
-    * `user.include_files` (one-off important files)
-* Compression modes:
-
-    * `high` (zstd `-19`)
-    * `light` (zstd `-3`)
-    * `none` (plain `.tar`)
-* Local compression only:
-
-    * No dependency on the NAS having zstd or GNU tar.
-* Single-copy mirrors:
-
-    * Declarative `"LOCAL_SRC|REMOTE_DEST"` mappings.
-* Retention:
-
-    * Keep at most `retention.snapshots` snapshot directories per host.
-* Systemd integration:
-
-    * Ones-shot service + timer per host.
-* Logging:
-
-    * Structured, timestamped logs via `journalctl`.
+- Collects a curated set of **system paths** (e.g., `/etc/...`)
+- Collects selected **user dirs/files** (e.g., `~/.ssh`, `~/.gnupg`, etc.)
+- Applies **exclude patterns** to avoid cache-bloat
+- Writes snapshots into a **restic repository on your NAS** via `sftp:<host>:<path>`
+- (Optional) runs retention policy (`forget --prune`) after successful backup
 
 ---
 
-## 5. Dependencies
+## High-level flow
 
-On each host:
+```mermaid
+flowchart LR
+  A[backup.py] --> B[restic backup]
+  B --> C[sftp over ssh]
+  C --> D[restic repo on NAS]
+  A --> E[restic forget]
+  E --> D
+```
 
-* `python` (3.x)
-* `python-yaml` (PyYAML)
-* `rsync`
-* `openssh`
-* `tar`
-* `zstd` (optional but strongly recommended if using `compression.mode: high|light`)
+Notes:
+- The “repo on NAS” is **not** a browsable mirror of your files. It’s restic’s encrypted, chunked storage.
+- You browse/restore using **restic commands** (CLI), not a file browser.
 
-Example (Arch-based host):
+---
+
+## Requirements
+
+On the machine running the backup (e.g. your workstation/server):
+
+- Python 3.11+ (older may work, but 3.11+ is recommended)
+- `restic` installed on the OS
+- SSH key-based access to the NAS (no password prompts)
+- The NAS must allow SFTP access to the destination path
+
+On Arch Linux:
 
 ```bash
-sudo pacman -S python python-yaml rsync openssh tar zstd
+sudo pacman -S restic
 ```
 
 ---
 
-## 6. Configuration (`backup.yaml`)
+## Quick start
 
-Each host has its own `backup.yaml` next to the script.
+1) Clone and install somewhere predictable (example):
 
-### 6.1 Schema overview
+```bash
+sudo mkdir -p /usr/local/sbin/zuzu-system-backup
+sudo cp -av backup.py /usr/local/sbin/zuzu-system-backup/backup.py
+sudo chmod 0755 /usr/local/sbin/zuzu-system-backup/backup.py
+```
 
-* `remote`: where to send backups
-* `retention`: how many snapshots to keep
-* `compression`: how to compress snapshot archives
-* `rsync`: extra rsync flags
-* `system`: system-level include paths
-* `user`: user home and per-user include paths/files
-* `exclude_patterns`: rsync-style excludes
-* `single_copy_mappings`: one-way mirrors (no history)
+2) Create a config:
 
-### 6.2 Example `backup.yaml` (for host `orion`)
+```bash
+sudo cp -av zuzu-system-backup.yaml /usr/local/sbin/zuzu-system-backup/backup.yaml
+sudoedit /usr/local/sbin/zuzu-system-backup/backup.yaml
+```
+
+3) Create a restic password file (local machine):
+
+```bash
+sudo mkdir -p /srv/conf/restic
+sudoedit /srv/conf/restic/.pwd.restic
+sudo chmod 0600 /srv/conf/restic/.pwd.restic
+```
+
+4) Run a first backup manually:
+
+```bash
+cd /usr/local/sbin/zuzu-system-backup
+sudo ./backup.py --config ./backup.yaml run
+```
+
+5) List snapshots:
+
+```bash
+# Use the same repo + password file the script uses:
+restic \
+  -r "sftp:zocalo:/share/backup/automated/daily/system-orion/restic-repo" \
+  --password-file /srv/conf/restic/.pwd.restic \
+  snapshots
+```
+
+(If you like ergonomics: create a shell alias/wrapper, see “Convenience commands”.)
+
+---
+
+## Configuration
+
+An example config is provided in `zuzu-system-backup.yaml`. Keep it generic; don’t commit personal secrets.
+
+### `remote`
+
+Where the NAS is, and where backups land.
 
 ```yaml
 remote:
@@ -224,266 +170,281 @@ remote:
   key: /home/backupuser/.ssh/id_ed25519-orion
   base: /srv/backup/automated
   host_dir: system-orion
+```
 
+The script uses:
+
+- `base` + `host_dir` as the logical destination root
+- a restic repo directory under that (see `restic.repository` below)
+
+### `restic`
+
+At minimum, you must provide a password file:
+
+```yaml
+restic:
+  password_file: /srv/conf/restic/.pwd.restic
+  # repository: "sftp:zocalo:/share/backup/automated/daily/system-orion/restic-repo"
+```
+
+If `repository` is not set, the script derives a default repo path from `remote.base` and `remote.host_dir`.
+
+### `retention`
+
+Time-based, “smart” retention. Typical setup:
+
+```yaml
 retention:
-  # Max number of snapshot directories to keep on NAS
-  snapshots: 7
+  keep_daily: 7
+  keep_weekly: 4
+  keep_monthly: 6
+  keep_yearly: 1
+  keep_within: ""     # optional, e.g. "14d" or "3m"
+```
 
-compression:
-  # high | light | none
-  mode: high
-  # Optional: where local temp trees and archives live
-  path: /srv/tmp/backups
+These map directly to `restic forget` flags:
 
-rsync:
-  extra_opts:
-    - --numeric-ids
-    - --info=progress2
-    - --protect-args
+- `keep_daily`   -> `--keep-daily N`
+- `keep_weekly`  -> `--keep-weekly N`
+- `keep_monthly` -> `--keep-monthly N`
+- `keep_yearly`  -> `--keep-yearly N`
+- `keep_within`  -> `--keep-within DURATION`
 
+### `system.include_paths`
+
+A list of **absolute paths** to include. These can be:
+
+- Files
+- Directories
+- Globs (e.g. `/etc/systemd/system/*.mount`)
+
+Example:
+
+```yaml
 system:
   include_paths:
     - /etc/nftables.conf
     - /etc/snapper/configs
-    - /etc/NetworkManager/system-connections
-    - /etc/chromium/policies/managed
-    - /etc/fstab
     - /etc/systemd/system/*.mount
-    - /etc/systemd/system/*.automount
-    - /etc/nut/nut.conf
-    - /etc/nut/upsmon.conf
+    - /srv/data/traefik
+```
 
+If you include a directory, restic will back up the directory contents.
+
+### `user`
+
+A base home plus relative directories/files:
+
+```yaml
 user:
   home: /home/devuser
 
   include_dirs:
     - .ssh
     - .gnupg
-    - .local/share/wallpapers
-    - projects
-    - pkgbuilds
-    - venvs
 
   include_files:
-    - .config/chromium/Default/Preferences
-    - .config/chromium/Default/Bookmarks
-    - .config/vlc/vlcrc
     - .gitconfig
     - .bashrc
-    - .bash_profile
-    - .local/share/user-places.xbel
-
-exclude_patterns:
-  # Caches (generic)
-  - "**/Cache/**"
-  - "**/GPUCache/**"
-  - "**/shadercache/**"
-  - "**/ShaderCache/**"
-  - "**/Code Cache/**"
-
-  # SSH ControlMaster sockets
-  - "${USER_HOME}/.ssh/ctl-*"
-  - "**/.ssh/ctl-*"
-
-  # JetBrains bulk (plugins + Toolbox app bundles)
-  - "${USER_HOME}/.local/share/JetBrains/**/plugins/**"
-  - "${USER_HOME}/.local/share/JetBrains/Toolbox/apps/**"
-  - "${USER_HOME}/.cache/JetBrains/**"
-
-  # Chromium bulk (we include only specific files above)
-  - "${USER_HOME}/.config/chromium/**"
-
-single_copy_mappings:
-  # Example mirrors:
-  - "/srv/data/postgres|/srv/backup/automated/sync/system-orion-postgres"
-  - "/srv/data/models|/srv/backup/automated/sync/system-orion-models"
 ```
 
-Notes:
+### `exclude_patterns`
 
-* `user.include_dirs` and `user.include_files` are **relative to `user.home`** unless they start with `/`.
-* `${USER_HOME}` and `${HOME}` in `exclude_patterns` are expanded to `user.home` by the script.
-* `single_copy_mappings` paths are *not* expanded; use absolute paths.
+Exclude patterns are applied to reduce junk. `${USER_HOME}` is expanded.
 
 ---
 
-## 7. Script usage
+## How much data gets sent when things change?
 
-### 7.1 Manual run
+Restic is chunk-based and deduplicating:
 
-From the directory where the script lives, or via its full path:
+- On the first run, it uploads everything once.
+- On later runs, it only uploads **new chunks** (changed file parts) and some small metadata.
+- If you change a 10 MiB file, it typically uploads **only the changed parts**, not your whole dataset.
+
+Practical implication: daily runs are usually fast and bandwidth-light unless you have lots of changes.
+
+---
+
+## Convenience commands (recommended)
+
+Create a small wrapper script or alias so you don’t retype the repo/password every time.
+
+Example alias (bash/zsh):
 
 ```bash
-sudo /usr/local/sbin/zuzu-system-backup/zuzu-system-backup.py
+alias restic-zocalo='restic -r "sftp:zocalo:/share/backup/automated/daily/system-orion/restic-repo" --password-file /srv/conf/restic/.pwd.restic'
 ```
 
-(or whatever path you install it to)
+Then:
 
-Logs go to stderr; under systemd, they land in `journalctl`.
+```bash
+restic-zocalo snapshots
+restic-zocalo stats
+```
 
-### 7.2 Systemd service & timer
+---
+
+## Browsing and restore workflows
+
+### List snapshots
+
+```bash
+restic-zocalo snapshots
+```
+
+### See what’s inside a snapshot
+
+```bash
+# List top-level paths within a snapshot
+restic-zocalo ls b21638dd
+
+# List a subpath within that snapshot
+restic-zocalo ls b21638dd /home/devuser/.ssh
+```
+
+### Search for a file
+
+```bash
+restic-zocalo find --name "id_ed25519*"
+```
+
+### See “largest stuff” and general size breakdown
+
+```bash
+restic-zocalo stats
+restic-zocalo stats --mode files-by-extensions
+restic-zocalo stats --mode raw-data
+```
+
+(For “top N largest files”, restic doesn’t have a perfect single command, but `stats` plus targeted `find` usually gets you there quickly.)
+
+### Restore a single file / directory
+
+```bash
+# Restore a directory
+restic-zocalo restore b21638dd --target /tmp/restore --include "/home/devuser/.ssh"
+
+# Restore a single file
+restic-zocalo restore b21638dd --target /tmp/restore --include "/etc/nftables.conf"
+```
+
+### Mount a snapshot (browse like a filesystem)
+
+Restic can mount a FUSE filesystem:
+
+```bash
+mkdir -p /tmp/restic-mount
+restic-zocalo mount /tmp/restic-mount
+```
+
+Then browse under `/tmp/restic-mount/snapshots/...`.
+
+---
+
+## Retention (forget/prune)
+
+This is the “smart versioning” part.
+
+Example manual retention run:
+
+```bash
+restic-zocalo forget \
+  --keep-daily 7 \
+  --keep-weekly 4 \
+  --keep-monthly 6 \
+  --keep-yearly 1 \
+  --prune
+```
+
+If you tag snapshots (recommended), you can scope retention:
+
+```bash
+restic-zocalo forget --tag host=system-orion --keep-daily 7 --keep-weekly 4 --keep-monthly 6 --keep-yearly 1 --prune
+```
+
+---
+
+## systemd scheduling (service + timer)
+
+The clean pattern is:
+
+- a `*.service` that runs one backup
+- a `*.timer` that schedules it
+
+Key point: systemd doesn’t run in your repo directory by default, so either:
+
+- set `WorkingDirectory=...`, or
+- pass an **absolute** `--config /path/to/backup.yaml`
 
 Example service:
 
 ```ini
-# /etc/systemd/system/host-backup.service
 [Unit]
-Description=Host backup to NAS via zuzu-system-backup
+Description=zuzu-system-backup (restic)
 Wants=network-online.target
 After=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/sbin/zuzu-system-backup/zuzu-system-backup.py
-Nice=10
-IOSchedulingClass=best-effort
-IOSchedulingPriority=7
+WorkingDirectory=/usr/local/sbin/zuzu-system-backup
+ExecStart=/usr/bin/python /usr/local/sbin/zuzu-system-backup/backup.py --config /usr/local/sbin/zuzu-system-backup/backup.yaml run
 ```
 
 Example timer:
 
 ```ini
-# /etc/systemd/system/host-backup.timer
 [Unit]
-Description=Nightly host backup to NAS
+Description=Run zuzu-system-backup daily
 
 [Timer]
 OnCalendar=*-*-* 03:15:00
-RandomizedDelaySec=20min
 Persistent=true
 
 [Install]
 WantedBy=timers.target
 ```
 
-Enable and start:
+Enable:
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable --now host-backup.timer
+sudo systemctl enable --now zuzu-system-backup.timer
 ```
 
-Check status:
+Run once immediately:
 
 ```bash
-systemctl list-timers 'host-backup*'
-journalctl -u host-backup.service -n 50
+sudo systemctl start zuzu-system-backup.service
 ```
 
 ---
 
-## 8. Retention policy
+## Troubleshooting
 
-Retention is implemented as “keep at most **N snapshots**” for each host:
+### “FileNotFoundError: backup.yaml”
 
-* `retention.snapshots: 7` → keep the newest 7 snapshot directories under `REMOTE_BASE/host_dir/snapshots`.
-* Snapshot directory names are timestamps: `YYYY-MM-DD_HH-MM-SS`.
-* Older snapshot dirs are deleted entirely (`rm -rf` on the NAS via SSH).
+Your service is running with a different working directory. Fix by using an absolute config path, or set `WorkingDirectory=` in the unit.
 
-No time math on `mtime`, just count-based retention by sorted timestamp name; simple and predictable.
+### “repository does not exist”
 
----
+Either:
 
-## 9. Restore basics
+- the repo path is wrong, or
+- `restic init` hasn’t been run yet.
 
-### 9.1 Restoring from a snapshot archive
+### SSH prompts / stuck backups
 
-On the NAS or after copying archives locally:
+Make sure SSH is truly non-interactive:
 
-```bash
-# Example: restore system snapshot for 2025-01-02 from host "orion"
-cd /restore/target
-
-# If compressed
-zstd -d /srv/backup/automated/daily/system-orion/2025-01-02_03-00-01/system.tar.zst -o system.tar
-tar -xf system.tar
-
-# If compression.mode was "none"
-tar -xf /srv/backup/automated/daily/system-orion/2025-01-02_03-00-01/system.tar
-```
-
-Repeat for `user-dirs.tar(.zst)` and `user-files.tar(.zst)` as needed.
-
-### 9.2 Restoring from a mirror
-
-Mirrors are just rsynced trees; you can restore them with rsync or cp:
-
-```bash
-# rsync mirror back to host
-rsync -aHAX --numeric-ids \
-  backupuser@backup-nas.local:/srv/backup/automated/sync/system-orion-postgres/ \
-  /srv/data/postgres/
-```
-
-Always test restores on a non-production target first.
+- key is readable by the service user
+- NAS host key is accepted (add it to `~/.ssh/known_hosts`)
+- your SSH config `Host ...` stanza matches the hostname used in the repo URL
 
 ---
 
-## 10. Safety notes
+## Roadmap ideas (not implemented here)
 
-* **Mirrors are destructive:**
-
-    * `single_copy_mappings` use rsync `--delete`.
-    * Deletes on the host will remove files on the backup side in the next run.
-* **Snapshots are immutable per run:**
-
-    * Each run creates a new directory, writes archives, and then retention may remove older snapshot dirs.
-* **Local compression uses space:**
-
-    * `compression.path` should point at a filesystem with enough free space to hold a full snapshot’s uncompressed temp trees **plus** the compressed archives.
-* **Permissions:**
-
-    * The script expects to be run as root (or with enough privileges) to read system paths and user homes.
-* **SSH keys:**
-
-    * Use dedicated SSH keys per host with restricted accounts on the NAS where possible.
-
----
-
-
-## 10. Contributing
-
-Contributions are very welcome, especially around:
-
-* additional backup backends or layout conventions,
-* smarter snapshot/mirror strategies (e.g., per-path compression settings),
-* restore helpers and verification tooling,
-* better safety guards around destructive operations (`--delete`, pruning),
-* distro packaging (Arch, Debian, containers, etc.).
-
-Basic guidelines:
-
-* Treat this as infrastructure code:
-    * avoid surprises in defaults (compression, retention, paths),
-    * keep the YAML schema stable and well-documented,
-    * make new features opt-in whenever they could delete or overwrite data.
-* Be conservative with `rsync --delete`:
-    * mirrors are intentionally destructive, but code paths that trigger deletion should be obvious and well-commented.
-* Keep logs readable and actionable:
-    * clear “what is happening” messages,
-    * explicit summary per run (snapshot name, mirrors processed, pruning done).
-
-Bug reports and pull requests are preferred over vibes and interpretive dance.
-
----
-
-## 11. License
-
-This project is licensed under the **MIT License**.
-
-See the `LICENSE` file in this repository for the full text.
-
----
-
-## 12. Author & acknowledgements
-
-**Author / Maintainer**
-
-* **Name:** Peter Knauer (zuzu@quantweave.ca)
-
-**Acknowledgements**
-
-* Inspired by earlier shell-based backup scripts and ad-hoc rsync one-liners that deserved a nicer life.
-* Thanks to everyone who runs this on real systems, weird filesystems, and “creative” NAS setups and reports back what explodes.
-
-The goal of this project is to make Linux backups **boring, predictable, and inspectable**—for both humans and tools trying to reason about how and where data is stored.
+- Containerized “backup runner” image (python + restic + config volume)
+- Multiple profiles (multiple configs + schedules) for different datasets/retention
+- Optional “copy-to-cloud” step (separate repo/bucket per system)
